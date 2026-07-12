@@ -42,6 +42,9 @@ CODE_SEARCH_MAX_STEPS = int(_env("CODE_SEARCH_MAX_STEPS", "16"))
 # Extra full attempts after a failed search; each retry doubles the step budget.
 CODE_SEARCH_RETRIES = int(_env("CODE_SEARCH_RETRIES", "1"))
 
+# Max completion tokens per code_apply edit; raise for models with bigger output windows.
+CODE_APPLY_MAX_TOKENS = int(_env("CODE_APPLY_MAX_TOKENS", "32768"))
+
 # Deterministic tools (no LLM): output caps.
 CODE_FIND_MAX_HITS = int(_env("CODE_FIND_MAX_HITS", "20"))
 CODE_MAP_MAX_LINES = int(_env("CODE_MAP_MAX_LINES", "2000"))

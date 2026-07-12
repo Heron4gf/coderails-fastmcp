@@ -160,12 +160,13 @@ def register_tools(mcp: FastMCP) -> None:
 
         Pass multiple queries in one call: edits to different files run in parallel
         (same-file edits run sequentially in order). Returns one result per query:
-        {file, status: "applied"|"rejected"|"gate_failed"|"error", diff?, reason?, lint?}.
-        Every edit is gated before the file is written: a tree-sitter parse check
-        plus a lint diff (pyflakes / eslint when available) — an edit that
-        introduces a syntax error or a new lint error (e.g. an undefined name)
-        returns status "gate_failed" and the file is left untouched. Pre-existing
-        lint issues are grandfathered and attached as `lint`.
+        {file, status: "applied"|"rejected"|"error", diff, reason?, warnings?}.
+        The diff is the primary output — read it to see exactly what changed.
+        Advisory checks (tree-sitter parse + lint diff against the original)
+        attach `warnings` when the edit introduces a syntax error or a new lint
+        finding (e.g. an undefined name); they never block the edit. The one
+        hard stop: truncated model output is refused, so a partial file is
+        never written.
 
         Args:
             root_dir: Absolute path of the project containing the files.

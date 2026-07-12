@@ -11,7 +11,7 @@ are deterministic and run no model:
 | `code_search` | Groq | `qwen/qwen3.6-27b` | Agentic codebase search; returns only verified relevant files with a role tag and source snippets (content + line ranges); fallback — prefer code_map/code_find when a concrete string or symbol can be named |
 | `code_map` | local | tree-sitter (no LLM) | Directory tree + top-level symbol outline; degrades to tree-only on oversized scopes |
 | `code_find` | local | ripgrep + tree-sitter (no LLM) | Exact regex/symbol search; every hit expanded to its full enclosing function/class |
-| `code_apply` | Groq | `qwen/qwen3.6-27b` | Applies natural-language edits (optionally anchored to one symbol) gated by a tree-sitter parse check and lint diff; returns unified diffs |
+| `code_apply` | Groq | `qwen/qwen3.6-27b` | Applies natural-language edits (optionally anchored to one symbol); always returns the unified diff, plus advisory parse/lint warnings |
 
 Every LLM-backed tool accepts a `queries` array and runs all queries concurrently —
 that parallelism is the whole point, so always batch your independent queries into
@@ -77,6 +77,7 @@ cp .env.example .env
 | `CODE_APPLY_MODEL` | `qwen/qwen3.6-27b` | `code_apply` model (Groq) |
 | `CODE_SEARCH_MAX_STEPS` | `16` | Max agent steps per `code_search` query |
 | `CODE_SEARCH_RETRIES` | `1` | Extra attempts after a failed search (each doubles the step budget) |
+| `CODE_APPLY_MAX_TOKENS` | `32768` | Max completion tokens per `code_apply` edit (raise for bigger-output models) |
 | `CODE_FIND_MAX_HITS` | `20` | Max enclosing-symbol hits per `code_find` query |
 | `CODE_MAP_MAX_LINES` | `2000` | Hard cap on `code_map` output before it degrades |
 
@@ -113,9 +114,11 @@ Add to `~/.claude.json` under `mcpServers`, pointing `--directory` at your clone
 `code_apply` policy: **"Nothing implied gets applied, only what's explicitly
 stated."** Malformed or underspecified instructions are rejected (`status:
 "rejected"` with a reason); ambiguous but feasible ones are applied literally.
-Every edit is then gated before the file is written: a tree-sitter parse check
-plus a lint diff (pyflakes / eslint when available) — an edit that introduces a
-syntax error or a new lint error returns `status: "gate_failed"` and leaves the
-file untouched. `code_search` follows the mirror policy: **"Returns only what it
-can verify, never what it assumes"** — it reports only files it actually opened
-and confirmed relevant.
+The unified diff is the primary output of every applied edit. Advisory checks
+(tree-sitter parse + lint diff against the original, pyflakes / eslint when
+available) attach `warnings` when an edit introduces a syntax error or a new
+lint finding — they never block the edit. The one hard stop: model output that
+hits the token limit is refused, so a partial file is never written.
+`code_search` follows the mirror policy: **"Returns only what it can verify,
+never what it assumes"** — it reports only files it actually opened and
+confirmed relevant.

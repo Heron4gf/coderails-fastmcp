@@ -1,11 +1,13 @@
 """code_apply tool backend: the edit model rewrites a file (or one anchored symbol) per instruction.
 
 Pipeline per edit: evaluate the instruction -> reject malformed / adjust ambiguous
-but feasible -> emit the updated code -> gate it (tree-sitter parse check + lint
-diff) -> only then overwrite the file on disk and return a unified diff. With a
-`symbol` anchor the model sees and rewrites only that definition, spliced back
-into the file. Policy: "Nothing implied gets applied, only what's explicitly
-stated" — and the gate means it cannot ship a syntax error or a new undefined name.
+but feasible -> emit the updated code -> overwrite the file on disk and return a
+unified diff as the primary output, with advisory warnings (tree-sitter parse
+check + lint diff against the original) attached when the edit introduces new
+problems. With a `symbol` anchor the model sees and rewrites only that
+definition, spliced back into the file. Policy: "Nothing implied gets applied,
+only what's explicitly stated." The one hard stop: truncated model output is
+refused, so a partial file is never written.
 """
 
 import asyncio
@@ -28,23 +30,27 @@ ANCHORED_SYSTEM_PROMPT = load_prompt("code_apply.anchored.system")
 ANCHORED_USER_PROMPT_TEMPLATE = load_prompt("code_apply.anchored.user")
 
 _REJECTED_RE = re.compile(r"<rejected>(.*?)</rejected>", re.DOTALL)
+# Greedy on purpose: first <file> to the LAST </file>, so content that itself
+# contains fences, <file> tags or the rejection marker survives intact.
+_FILE_RE = re.compile(r"<file>\n?(.*)\n?</file>", re.DOTALL)
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)\n?```", re.DOTALL)
 
 
 def _parse_response(text: str) -> tuple[str, str]:
     """Return ("rejected", reason) or ("applied", new_content) or raise ValueError."""
-    # Only look for the rejection marker OUTSIDE fenced code: the file being
-    # edited may itself contain the literal rejection pattern (this very module
-    # does), and matching inside the emitted code block misreads an applied
-    # edit as a rejection.
+    file_match = _FILE_RE.search(text)
+    if file_match:
+        return "applied", file_match.group(1)
+    # Rejection is only checked when no <file> block exists, and only outside
+    # fenced code: the file being edited may contain the literal marker itself.
     rejected = _REJECTED_RE.search(_FENCE_RE.sub("", text))
     if rejected:
         return "rejected", rejected.group(1).strip()
     fences = _FENCE_RE.findall(text)
     if fences:
-        # Take the largest fenced block: the full file dwarfs any stray snippet.
+        # Legacy fallback for models that fence the file instead of tagging it.
         return "applied", max(fences, key=len)
-    raise ValueError("Model response contained neither <rejected> nor a fenced code block.")
+    raise ValueError("Model response contained neither <rejected> nor file content.")
 
 
 def _write_preserving_newlines(target: Path, original: str, new_content: str) -> str:
@@ -134,34 +140,31 @@ def _lint(command: list[str], root: Path, content: str) -> list[str] | None:
     return diagnostics
 
 
-def _run_gate(
+def _edit_warnings(
     root: Path, rel_path: str, lang: str | None, original: str, candidate: str
-) -> tuple[str | None, list[str]]:
-    """Gate candidate content before anything is written: (gate_error, remaining_diagnostics).
+) -> list[str]:
+    """Advisory, non-blocking checks: problems the edit *introduces*.
 
-    Parse errors and lint diagnostics *introduced by the edit* fail the gate;
-    problems already present in the original are grandfathered and merely reported.
+    Parse errors and lint diagnostics already present in the original are
+    grandfathered and not reported; the edit is applied either way.
     """
-    if lang:
-        if syntax.has_parse_errors(candidate, lang) and not syntax.has_parse_errors(original, lang):
-            return "the edited file no longer parses (syntax error introduced by the edit)", []
+    warnings: list[str] = []
+    if lang and syntax.has_parse_errors(candidate, lang) and not syntax.has_parse_errors(original, lang):
+        warnings.append("the edited file no longer parses (syntax error introduced by the edit)")
     command = _lint_command(lang, rel_path)
     if not command:
-        return None, []
+        return warnings
     baseline = _lint(command, root, original)
     current = _lint(command, root, candidate)
     if baseline is None or current is None:
-        return None, []
+        return warnings
     remaining = list(baseline)
-    introduced: list[str] = []
     for diag in current:
         if diag in remaining:
             remaining.remove(diag)
         else:
-            introduced.append(diag)
-    if introduced:
-        return "the edit introduces lint errors: " + "; ".join(introduced[:10]), []
-    return None, current
+            warnings.append(f"new lint finding: {diag}")
+    return warnings
 
 
 async def _apply_one(root: Path, file: str, instruction: str, symbol: str | None = None) -> dict[str, Any]:
@@ -209,9 +212,16 @@ async def _apply_one(root: Path, file: str, instruction: str, symbol: str | None
         response = await get_groq_client().chat.completions.create(
             model=config.CODE_APPLY_MODEL,
             messages=messages,
-            max_tokens=32768,
+            max_tokens=config.CODE_APPLY_MAX_TOKENS,
+            temperature=0,
         )
-        status, payload = _parse_response(response.choices[0].message.content or "")
+        choice = response.choices[0]
+        if choice.finish_reason == "length":
+            # The only hard stop: a truncated response means a partial file.
+            raise ValueError(
+                "model output was truncated (hit CODE_APPLY_MAX_TOKENS); refusing to write a partial file"
+            )
+        status, payload = _parse_response(choice.message.content or "")
 
         if status == "rejected":
             result.update(status="rejected", reason=payload)
@@ -222,16 +232,11 @@ async def _apply_one(root: Path, file: str, instruction: str, symbol: str | None
             candidate += "\n"
 
         rel = target.relative_to(root).as_posix() if root in target.parents or target == root else target.as_posix()
-        gate_error, lint_notes = await asyncio.to_thread(_run_gate, root, rel, lang, original, candidate)
-        if gate_error:
-            # Nothing is written on gate failure: the file on disk is untouched.
-            result.update(status="gate_failed", reason=gate_error)
-            return result
-
+        warnings = await asyncio.to_thread(_edit_warnings, root, rel, lang, original, candidate)
         new_content = _write_preserving_newlines(target, original, candidate)
         result.update(status="applied", diff=_unified_diff(rel, original, new_content) or "(no changes)")
-        if lint_notes:
-            result["lint"] = lint_notes
+        if warnings:
+            result["warnings"] = warnings
         return result
     except Exception as exc:
         result.update(status="error", reason=f"{type(exc).__name__}: {exc}")
