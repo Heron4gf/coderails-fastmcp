@@ -62,7 +62,18 @@ def register_tools(mcp: FastMCP) -> None:
 
         Pass multiple queries in one call: each runs as an independent parallel
         search. Returns one result per query:
-        {query, explanation, files: {relative_path: [[start_line, end_line], ...]}}.
+        {query, explanation, files: [{file, role, snippets}]} where `role` is a
+        <=5-word tag saying why the file matters and each snippet is
+        {start_line, end_line, content} carrying the actual source lines, so you
+        usually don't need to open the files yourself.
+
+        Reliability semantics: if the step budget runs out, findings are salvaged
+        and marked `partial: true` — trust the files listed, but the topic may not
+        be fully covered. A query that fails outright is retried with a doubled
+        budget; if it still fails it comes back with `not_covered: true` and an
+        explanation starting "TOPIC NOT COVERED". Treat that as a hole in the
+        results: no other query's answer stands in for it — search that topic
+        yourself or re-run it.
 
         Args:
             root_dir: Absolute path of the repository/project to search.

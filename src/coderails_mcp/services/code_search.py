@@ -101,8 +101,24 @@ TOOLS: list[dict[str, Any]] = [
                     "explanation": {"type": "string"},
                     "files": {
                         "type": "object",
-                        "description": "Map of file path -> list of [start, end] line ranges",
-                        "additionalProperties": {"type": "array"},
+                        "description": (
+                            "Map of file path -> {role, ranges}. `role` is a tag of at most 5 words "
+                            "describing why the file matters for the query. `ranges` is a list of "
+                            "[start_line, end_line] pairs (1-indexed, inclusive, from the line numbers "
+                            "shown by view_file/grep_search) delineating the relevant snippets."
+                        ),
+                        "additionalProperties": {
+                            "type": "object",
+                            "required": ["role", "ranges"],
+                            "properties": {
+                                "role": {"type": "string"},
+                                "ranges": {
+                                    "type": "array",
+                                    "items": {"type": "array", "items": {"type": "integer"}},
+                                },
+                            },
+                            "additionalProperties": False,
+                        },
                     },
                 },
                 "additionalProperties": False,
@@ -269,23 +285,81 @@ async def _execute_tool_call(root: Path, name: str, args: dict[str, Any]) -> str
     return await asyncio.to_thread(run)
 
 
-def _normalize_reported_files(root: Path, files: Any) -> dict[str, list[list[int]]]:
-    """Make reported paths relative to root and shaped as {path: [[start, end], ...]}."""
-    normalized: dict[str, list[list[int]]] = {}
+def _normalize_reported_files(root: Path, files: Any) -> dict[str, dict[str, Any]]:
+    """Make reported paths relative to root and shaped as {path: {role, ranges}}."""
+    normalized: dict[str, dict[str, Any]] = {}
     if not isinstance(files, dict):
         return normalized
-    for raw_path, ranges in files.items():
+    for raw_path, value in files.items():
         path = str(raw_path).replace("\\", "/")
         try:
             resolved = Path(path) if Path(path).is_absolute() else root / path
             path = resolved.resolve().relative_to(root).as_posix()
         except (ValueError, OSError):
             path = path.removeprefix("/repo/").lstrip("/")
-        normalized[path] = ranges if isinstance(ranges, list) else []
+        if isinstance(value, dict):
+            role = str(value.get("role", "")).strip()
+            ranges = value.get("ranges", [])
+        else:
+            # Tolerate the legacy shape where the value was a bare list of ranges.
+            role = ""
+            ranges = value
+        role = " ".join(role.split()[:5])
+        normalized[path] = {"role": role, "ranges": ranges if isinstance(ranges, list) else []}
     return normalized
 
 
-async def _search_one(root: Path, query: str) -> dict[str, Any]:
+_MAX_SNIPPET_CHARS = 4_000
+
+
+def _extract_snippets(root: Path, path: str, ranges: Any) -> list[dict[str, Any]]:
+    """Turn [start, end] line ranges into snippets carrying the actual file content."""
+    try:
+        lines = (root / path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return [{"error": f"could not read file: {exc}"}]
+    snippets: list[dict[str, Any]] = []
+    for rng in ranges:
+        if not (isinstance(rng, list) and len(rng) == 2):
+            continue
+        try:
+            start, end = int(rng[0]), int(rng[1])
+        except (TypeError, ValueError):
+            continue
+        if end == -1:
+            end = len(lines)
+        start = max(1, start)
+        end = min(len(lines), end)
+        if start > end:
+            continue
+        content = "\n".join(lines[start - 1 : end])
+        if len(content) > _MAX_SNIPPET_CHARS:
+            content = content[:_MAX_SNIPPET_CHARS] + "\n... (snippet truncated)"
+        snippets.append({"start_line": start, "end_line": end, "content": content})
+    return snippets
+
+
+def _build_file_results(root: Path, files: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expand normalized {path: {role, ranges}} into per-file entries with real snippet content."""
+    return [
+        {
+            "file": path,
+            "role": info["role"],
+            "snippets": _extract_snippets(root, path, info["ranges"]),
+        }
+        for path, info in files.items()
+    ]
+
+
+_FORCE_REPORT_PROMPT = (
+    "Your exploration budget is exhausted. Call report_back NOW with your best verified "
+    "findings so far. Include only files you actually opened and confirmed relevant, each "
+    "with a role tag and tight [start_line, end_line] ranges. If you verified nothing, "
+    "report an empty files map and say so in the explanation."
+)
+
+
+async def _run_search_attempt(root: Path, query: str, max_steps: int) -> dict[str, Any]:
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": USER_PROMPT_TEMPLATE.format(root_dir=str(root), query=query)},
@@ -293,19 +367,26 @@ async def _search_one(root: Path, query: str) -> dict[str, Any]:
     client = get_groq_client()
 
     try:
-        for _ in range(config.CODE_SEARCH_MAX_STEPS):
+        for step in range(max_steps):
+            # On the last step, stop exploring and force the model to salvage
+            # whatever it has verified so far instead of losing the whole run.
+            final_step = step == max_steps - 1
+            if final_step:
+                messages.append({"role": "user", "content": _FORCE_REPORT_PROMPT})
             response = await client.chat.completions.create(
                 model=config.CODE_SEARCH_MODEL,
                 messages=messages,
                 tools=TOOLS,
-                tool_choice="auto",
+                tool_choice=(
+                    {"type": "function", "function": {"name": "report_back"}} if final_step else "auto"
+                ),
             )
             message = response.choices[0].message
             tool_calls = message.tool_calls or []
 
             if not tool_calls:
                 # Model answered in plain text; treat it as the explanation.
-                return {"query": query, "explanation": message.content or "", "files": {}}
+                return {"query": query, "explanation": message.content or "", "files": []}
 
             # report_back terminates the loop
             for call in tool_calls:
@@ -314,16 +395,24 @@ async def _search_one(root: Path, query: str) -> dict[str, Any]:
                         args = json.loads(call.function.arguments or "{}")
                     except json.JSONDecodeError:
                         args = {}
-                    return {
+                    normalized = _normalize_reported_files(root, args.get("files", {}))
+                    result = {
                         "query": query,
                         "explanation": args.get("explanation", ""),
-                        "files": _normalize_reported_files(root, args.get("files", {})),
+                        "files": await asyncio.to_thread(_build_file_results, root, normalized),
                     }
+                    if final_step:
+                        result["partial"] = True
+                        result["note"] = (
+                            "Step budget ran out; these findings were salvaged via a forced "
+                            "report_back and may not cover the whole topic."
+                        )
+                    return result
 
             messages.append(
                 {
                     "role": "assistant",
-                    "content": message.content,
+                    "content": message.content or "",
                     "tool_calls": [
                         {
                             "id": c.id,
@@ -347,15 +436,33 @@ async def _search_one(root: Path, query: str) -> dict[str, Any]:
             for call, output in zip(tool_calls, outputs):
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": output})
 
-        return {
-            "query": query,
-            "explanation": "Step budget exhausted before the agent reported findings. "
-            "No verified files to return (files are only reported once confirmed relevant).",
-            "files": {},
-            "error": "max_steps_reached",
-        }
+        # Only reachable if the forced final report_back never materialized.
+        return {"query": query, "error": "max_steps_reached", "files": []}
     except Exception as exc:
-        return {"query": query, "error": f"{type(exc).__name__}: {exc}", "files": {}}
+        return {"query": query, "error": f"{type(exc).__name__}: {exc}", "files": []}
+
+
+async def _search_one(root: Path, query: str) -> dict[str, Any]:
+    """Run a search with retries; a query that still fails is flagged loudly as not covered."""
+    attempts = 1 + max(0, config.CODE_SEARCH_RETRIES)
+    result: dict[str, Any] = {"query": query, "error": "no attempts ran", "files": []}
+    for attempt in range(attempts):
+        result = await _run_search_attempt(root, query, config.CODE_SEARCH_MAX_STEPS * (attempt + 1))
+        if "error" not in result:
+            if attempt:
+                result["note"] = (
+                    f"First attempt failed; this result came from retry {attempt} "
+                    "with a doubled step budget. " + str(result.get("note", ""))
+                ).strip()
+            return result
+    result["not_covered"] = True
+    result["explanation"] = (
+        f"TOPIC NOT COVERED — this query failed on all {attempts} attempts "
+        f"(last error: {result.get('error')}). No files were verified for it, and the other "
+        "queries' results do NOT stand in for this topic. Search it yourself (grep/read) or "
+        "re-run this query on its own."
+    )
+    return result
 
 
 async def run_code_search(root_dir: str, queries: list[str]) -> list[dict[str, Any]]:

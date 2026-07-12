@@ -39,3 +39,5 @@ CODE_SEARCH_MODEL = _env("CODE_SEARCH_MODEL", "qwen/qwen3.6-27b")
 CODE_APPLY_MODEL = _env("CODE_APPLY_MODEL", "qwen/qwen3.6-27b")
 
 CODE_SEARCH_MAX_STEPS = int(_env("CODE_SEARCH_MAX_STEPS", "16"))
+# Extra full attempts after a failed search; each retry doubles the step budget.
+CODE_SEARCH_RETRIES = int(_env("CODE_SEARCH_RETRIES", "1"))

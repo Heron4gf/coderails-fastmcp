@@ -7,7 +7,7 @@ exposes three **batch-parallel** tools. `web_search` runs on OpenRouter;
 | Tool | Provider | Default model | What it does |
 |---|---|---|---|
 | `web_search` | OpenRouter | `perplexity/sonar-pro-search` | Answers web queries with sourced results |
-| `code_search` | Groq | `qwen/qwen3.6-27b` | Agentic codebase search; returns only verified relevant files with line ranges |
+| `code_search` | Groq | `qwen/qwen3.6-27b` | Agentic codebase search; returns only verified relevant files with a role tag and source snippets (content + line ranges) |
 | `code_apply` | Groq | `qwen/qwen3.6-27b` | Applies natural-language edits by rewriting whole files; returns unified diffs |
 
 Every tool accepts a `queries` array and runs all queries concurrently — that
