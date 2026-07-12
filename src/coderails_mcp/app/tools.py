@@ -11,12 +11,24 @@ from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
 from ..services.code_apply import run_code_apply
+from ..services.code_find import run_code_find
+from ..services.code_map import run_code_map
 from ..services.code_search import run_code_search
 from ..services.web_search import run_web_search
 
 
 class SearchQuery(BaseModel):
     query: str = Field(description="A single natural-language query.")
+
+
+class FindQuery(BaseModel):
+    pattern: str | None = Field(
+        None, description="Regex to search for. Exactly one of pattern/symbol per query."
+    )
+    symbol: str | None = Field(
+        None,
+        description="Identifier to look up: returns its definition plus every reference site.",
+    )
 
 
 class EditQuery(BaseModel):
@@ -28,10 +40,19 @@ class EditQuery(BaseModel):
             "instructions are rejected, not guessed at."
         )
     )
+    symbol: str | None = Field(
+        None,
+        description=(
+            "Optional anchor: name of a function/class defined in the file. The edit "
+            "model then sees and rewrites only that definition, which is spliced back "
+            "into the file — smaller blast radius and cheaper on big files. The "
+            "instruction must be satisfiable entirely inside that definition."
+        ),
+    )
 
 
 def register_tools(mcp: FastMCP) -> None:
-    """Register the web_search, code_search and code_apply tools on ``mcp``."""
+    """Register the web_search, code_search, code_map, code_find and code_apply tools on ``mcp``."""
 
     @mcp.tool
     async def web_search(queries: list[SearchQuery]) -> list[dict[str, Any]]:
@@ -48,6 +69,11 @@ def register_tools(mcp: FastMCP) -> None:
     @mcp.tool
     async def code_search(root_dir: str, queries: list[SearchQuery]) -> list[dict[str, Any]]:
         """Find the files in a codebase that matter for a natural-language query.
+
+        FALLBACK tool: prefer code_map to orient and code_find when you can name
+        an exact string or symbol — both are deterministic and instant. Use this
+        agentic search only for fuzzy conceptual queries where no concrete
+        identifier is known (rare after a code_map call).
 
         Search files -> a fast search agent generates commands -> performs agentic
         search (view_file / view_directory / grep) inside root_dir -> returns only
@@ -82,6 +108,44 @@ def register_tools(mcp: FastMCP) -> None:
         return await run_code_search(root_dir, [q.query for q in queries])
 
     @mcp.tool
+    async def code_map(root_dir: str, path: str | None = None, depth: int | None = None) -> dict[str, Any]:
+        """Orient in a codebase: directory tree + top-level symbol outline. Deterministic, no LLM.
+
+        Call this FIRST on an unfamiliar repo. Each code file lists its top-level
+        symbols with signatures (classes also list one level of members). Nothing
+        else — no descriptions, no prose. Output is hard-capped; an oversized
+        scope degrades to tree-only, then dirs-with-file-counts, with a note
+        telling you to re-scope. Paginate via `path` and `depth`.
+
+        Args:
+            root_dir: Absolute path of the repository/project.
+            path: Optional subdirectory (relative to root_dir) to scope the map to.
+            depth: Optional max directory depth to descend.
+        """
+        return await run_code_map(root_dir, path, depth)
+
+    @mcp.tool
+    async def code_find(root_dir: str, queries: list[FindQuery]) -> list[dict[str, Any]]:
+        """Exact search with AST-expanded context. Deterministic, instant, no LLM.
+
+        Each query is either {pattern} (regex over the repo) or {symbol}
+        (identifier lookup). Every hit returns the full enclosing function/class
+        via tree-sitter, so you usually don't need to open the file. Symbol mode
+        returns the definition plus every reference site, each with its enclosing
+        function — definition + blast radius in one call. Hits sharing an
+        enclosing symbol are deduped and capped per query, with total_matches so
+        you know when you're seeing a sample.
+
+        Prefer this over code_search whenever you can name a concrete string or
+        symbol — after a code_map call you usually can.
+
+        Args:
+            root_dir: Absolute path of the repository/project to search.
+            queries: Batch of {pattern} or {symbol} queries, run in parallel.
+        """
+        return await run_code_find(root_dir, [q.model_dump(exclude_none=True) for q in queries])
+
+    @mcp.tool
     async def code_apply(root_dir: str, queries: list[EditQuery]) -> list[dict[str, Any]]:
         """Apply natural-language edit instructions to files and get back diffs.
 
@@ -96,10 +160,15 @@ def register_tools(mcp: FastMCP) -> None:
 
         Pass multiple queries in one call: edits to different files run in parallel
         (same-file edits run sequentially in order). Returns one result per query:
-        {file, status: "applied"|"rejected"|"error", diff?, reason?}.
+        {file, status: "applied"|"rejected"|"gate_failed"|"error", diff?, reason?, lint?}.
+        Every edit is gated before the file is written: a tree-sitter parse check
+        plus a lint diff (pyflakes / eslint when available) — an edit that
+        introduces a syntax error or a new lint error (e.g. an undefined name)
+        returns status "gate_failed" and the file is left untouched. Pre-existing
+        lint issues are grandfathered and attached as `lint`.
 
         Args:
             root_dir: Absolute path of the project containing the files.
             queries: One {file, query} edit instruction per change.
         """
-        return await run_code_apply(root_dir, [{"file": q.file, "query": q.query} for q in queries])
+        return await run_code_apply(root_dir, [{"file": q.file, "query": q.query, "symbol": q.symbol} for q in queries])
