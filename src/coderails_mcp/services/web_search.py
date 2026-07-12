@@ -4,12 +4,12 @@ import asyncio
 from typing import Any
 
 from ..core import config
-from ..core.openrouter import get_client
+from ..core.clients import get_openrouter_client
 
 
 async def _search_one(query: str) -> dict[str, Any]:
     try:
-        response = await get_client().chat.completions.create(
+        response = await get_openrouter_client().chat.completions.create(
             model=config.WEB_SEARCH_MODEL,
             messages=[{"role": "user", "content": query}],
         )

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core import config
-from ..core.openrouter import get_client
+from ..core.clients import get_groq_client
 from ..prompts import load_prompt
 
 SYSTEM_PROMPT = load_prompt("code_apply.system")
@@ -69,7 +69,7 @@ async def _apply_one(root: Path, file: str, instruction: str) -> dict[str, Any]:
 
         original = target.read_text(encoding="utf-8", errors="replace")
 
-        response = await get_client().chat.completions.create(
+        response = await get_groq_client().chat.completions.create(
             model=config.CODE_APPLY_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},

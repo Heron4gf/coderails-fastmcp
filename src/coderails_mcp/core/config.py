@@ -26,11 +26,16 @@ def _env(name: str, default: str) -> str:
     return value or default
 
 
+# OpenRouter powers web_search (Perplexity Sonar).
 OPENROUTER_API_KEY = _env("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = _env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
+# Groq powers code_search and code_apply (Qwen3).
+GROQ_API_KEY = _env("GROQ_API_KEY", "")
+GROQ_BASE_URL = _env("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+
 WEB_SEARCH_MODEL = _env("WEB_SEARCH_MODEL", "perplexity/sonar-pro-search")
-CODE_SEARCH_MODEL = _env("CODE_SEARCH_MODEL", "relace/relace-search")
-CODE_APPLY_MODEL = _env("CODE_APPLY_MODEL", "inception/mercury-2")
+CODE_SEARCH_MODEL = _env("CODE_SEARCH_MODEL", "qwen/qwen3.6-27b")
+CODE_APPLY_MODEL = _env("CODE_APPLY_MODEL", "qwen/qwen3.6-27b")
 
 CODE_SEARCH_MAX_STEPS = int(_env("CODE_SEARCH_MAX_STEPS", "16"))

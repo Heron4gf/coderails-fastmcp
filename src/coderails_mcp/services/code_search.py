@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core import config
-from ..core.openrouter import get_client
+from ..core.clients import get_groq_client
 from ..prompts import load_prompt
 
 SYSTEM_PROMPT = load_prompt("code_search.system")
@@ -290,7 +290,7 @@ async def _search_one(root: Path, query: str) -> dict[str, Any]:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": USER_PROMPT_TEMPLATE.format(root_dir=str(root), query=query)},
     ]
-    client = get_client()
+    client = get_groq_client()
 
     try:
         for _ in range(config.CODE_SEARCH_MAX_STEPS):

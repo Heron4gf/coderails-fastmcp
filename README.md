@@ -1,13 +1,14 @@
 # CodeRails FastMCP
 
 A local [FastMCP](https://github.com/jlowin/fastmcp) server (stdio, no auth) that
-exposes three **batch-parallel** tools backed by OpenRouter models:
+exposes three **batch-parallel** tools. `web_search` runs on OpenRouter;
+`code_search` and `code_apply` run on Groq:
 
-| Tool | Default model | What it does |
-|---|---|---|
-| `web_search` | `perplexity/sonar-pro-search` | Answers web queries with sourced results |
-| `code_search` | `relace/relace-search` | Agentic codebase search; returns only verified relevant files with line ranges |
-| `code_apply` | `inception/mercury-2` | Applies natural-language edits by rewriting whole files; returns unified diffs |
+| Tool | Provider | Default model | What it does |
+|---|---|---|---|
+| `web_search` | OpenRouter | `perplexity/sonar-pro-search` | Answers web queries with sourced results |
+| `code_search` | Groq | `qwen/qwen3.6-27b` | Agentic codebase search; returns only verified relevant files with line ranges |
+| `code_apply` | Groq | `qwen/qwen3.6-27b` | Applies natural-language edits by rewriting whole files; returns unified diffs |
 
 Every tool accepts a `queries` array and runs all queries concurrently — that
 parallelism is the whole point, so always batch your independent queries into a
@@ -24,7 +25,7 @@ src/coderails_mcp/
 │   └── tools.py         # the three MCP tool definitions + argument models
 ├── core/                # shared infrastructure
 │   ├── config.py        # .env-driven configuration
-│   └── openrouter.py    # shared async OpenRouter client
+│   └── clients.py       # async OpenRouter + Groq clients
 ├── services/            # tool backends (the actual model calls)
 │   ├── web_search.py
 │   ├── code_search.py
@@ -57,11 +58,13 @@ cp .env.example .env
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | *(required)* | Your OpenRouter key |
-| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | API base URL |
-| `WEB_SEARCH_MODEL` | `perplexity/sonar-pro-search` | `web_search` model |
-| `CODE_SEARCH_MODEL` | `relace/relace-search` | `code_search` model |
-| `CODE_APPLY_MODEL` | `inception/mercury-2` | `code_apply` model |
+| `OPENROUTER_API_KEY` | *(required for web_search)* | Your OpenRouter key |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API base URL |
+| `GROQ_API_KEY` | *(required for code_search / code_apply)* | Your Groq key |
+| `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | Groq API base URL |
+| `WEB_SEARCH_MODEL` | `perplexity/sonar-pro-search` | `web_search` model (OpenRouter) |
+| `CODE_SEARCH_MODEL` | `qwen/qwen3.6-27b` | `code_search` model (Groq) |
+| `CODE_APPLY_MODEL` | `qwen/qwen3.6-27b` | `code_apply` model (Groq) |
 | `CODE_SEARCH_MAX_STEPS` | `16` | Max agent steps per `code_search` query |
 
 ## Run
